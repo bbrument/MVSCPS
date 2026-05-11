@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import shutil
@@ -10,8 +11,16 @@ from data_utils import (convert_numpy, fill_holes_in_mask, load_K_Rt_from_P,
 from scipy.io import loadmat
 from tqdm import tqdm
 
-root_dir = "data/DiLiGenT-MV_origin/DiLiGenT-MV/mvpmsData"
-target_dir = "data/DiLiGenT-MV"
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--root-dir', default='data/DiLiGenT-MV_origin/DiLiGenT-MV/mvpmsData')
+    parser.add_argument('--target-dir', default='data/DiLiGenT-MV')
+    args = parser.parse_args()
+    root_dir = args.root_dir
+    target_dir = args.target_dir
+else:
+    root_dir = "data/DiLiGenT-MV_origin/DiLiGenT-MV/mvpmsData"
+    target_dir = "data/DiLiGenT-MV"
 
 for obj_name in ["bear", "buddha", "pot2", "cow", "reading"]:
     target_image_dir = os.path.join(target_dir, obj_name, "image")

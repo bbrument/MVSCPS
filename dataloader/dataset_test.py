@@ -17,8 +17,8 @@ class DiligentTestDataset(Dataset):
 
         self.img_load_fn = REG.get("fn", cfg.img_load_fn)
         self.mask_load_fn = REG.get("fn", cfg.mask_load_fn)
-        self.camera_load_fn = REG.get("fn", "load_camera")
-        self.camera_select_fn = REG.get("fn", "select_camera")
+        self.camera_load_fn = REG.get("fn", cfg.get('camera_load_fn', 'load_camera'))
+        self.camera_select_fn = REG.get("fn", cfg.get('camera_select_fn', 'select_camera'))
 
         self.cams = self.camera_load_fn(cfg.cameras_fpath)
 
@@ -63,7 +63,7 @@ class DiligentTestDataset(Dataset):
             with ThreadPoolExecutor(max_workers=min(64, os.cpu_count())) as executor:
                 def load_normal(view_light_index):
                     view_idx = int(view_light_index.split("V")[1].split("L")[0])
-                    normal_path = os.path.join(self.config.data_dir, self.normal_dirname, f'V{view_idx:02d}.exr')
+                    normal_path = os.path.join(self.config.data_dir, self.normal_dirname, f'V{view_idx:02d}.{self.config.normal_ext}')
                     return normal_path
                 self.normal_maps_val = list(executor.map(load_normal, self.view_light_indices))
 

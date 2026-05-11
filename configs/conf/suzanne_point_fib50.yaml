@@ -1,11 +1,11 @@
 exp:
-  name: ${conf.dataset.obj_name}
-  phase: train  # or val, test, predict
+  name: suzanne
+  phase: train
   predict_after_train: true
-  test_after_train: true
+  test_after_train: false
   resume: false
   ckpt_path: ckpt
-  exp_path: exp/diligentmv
+  exp_path: exp/suzanne_point_colored_shadows_fib50
   runs_dir: runs
   trial_name: null
   code_path: code
@@ -24,7 +24,7 @@ trainer:
   log_every_n_steps: 100
   num_sanity_val_steps: 1
   val_check_interval: 1000
-  limit_val_batches: 1 # number of images to validate. Set to 1 (Not 1.0) to validate only one image.
+  limit_val_batches: 1
   limit_train_batches: 1.
   enable_progress_bar: true
   precision: 16
@@ -39,92 +39,82 @@ checkpoint:
   filename: "{global_step}-{epoch}"
 
 dataset:
-  obj_name: buddha
-  root_dir: ./data/DiLiGenT-MV
-  data_dir: ${conf.dataset.root_dir}/${conf.dataset.obj_name}
-
+  obj_name: suzanne
+  per_image_light: false
+  data_dir: data/synthetic_suzanne_point_colored_shadows_fib50
   img_dirname: image
   img_ext: "png"
   img_load_fn: diligentmv_img
-
   mask_dirname: mask
   mask_ext: "png"
   mask_load_fn: mask
-
-  normal_dirname: normal_camera_space_GT
-  normal_ext: "exr"
-  normal_load_fn: diligentmv_normal
-
+  normal_dirname: "None"
+  normal_ext: "None"
+  normal_load_fn: "None"
+  camera_load_fn: load_camera
+  camera_select_fn: select_camera
   cameras_fpath: ${conf.dataset.data_dir}/camera_params.json
-
-  light_dir_file: ${conf.model.light.light_dir_file}
-  light_int_file: ${conf.model.light.light_int_file}
+  light_dir_file: "None"
+  light_int_file: ${conf.dataset.data_dir}/light_intensities.txt
   sample_img_fname: "V00L00.png"
   sample_mask_fname: "V00.png"
   train:
     name: dataset_train
     init_num_rays_per_batch: 4096
     max_num_rays_per_batch: 4096
-    img_downscale: 1 # specify training image size by img_downscale
-    view_light_index_fname: view_18_light_32
-    view_light_index_file: ./configs/view_light_indices/${conf.dataset.train.view_light_index_fname}.txt
-
+    img_downscale: 1
+    view_light_index_fname: suzanne_fib50_point_train
+    view_light_index_file: ${conf.dataset.data_dir}/view_light_idx_train.txt
   val:
     name: dataset_val
-    img_downscale: 1 # for validation rendering
-    view_light_index_fname: view_18_light_32
-    view_light_index_file: ./configs/view_light_indices/${conf.dataset.val.view_light_index_fname}.txt
-    validataion_crop: true  # only render the image regions within the mask for acceleration
-
+    img_downscale: 4
+    view_light_index_fname: suzanne_fib50_point_val
+    view_light_index_file: ${conf.dataset.data_dir}/view_light_idx_val.txt
+    validataion_crop: true
   test:
     name: dataset_test
-    img_downscale: 1 # for rendering of test images
-    img_mesh_downscale: 1 # for mesh visualization
-    gt_mesh_fpath: ${conf.dataset.data_dir}/mesh_Gt.ply
-    view_light_index_fname: view_20_light_96
-    view_light_index_file: ./configs/view_light_indices/${conf.dataset.test.view_light_index_fname}.txt
-    validataion_crop: true  # only render the image regions within the mask for acceleration
-
-#  predict_targets: ["predict_mesh", "predict_brdf", "predict_relighting"] # specify which predictions to make during export phase.
+    img_downscale: 4
+    img_mesh_downscale: 4
+    gt_mesh_fpath: ${conf.dataset.data_dir}/gt_mesh.ply
+    view_light_index_fname: suzanne_fib50_point_test
+    view_light_index_file: ${conf.dataset.data_dir}/view_light_idx_test.txt
+    validataion_crop: true
   predict_targets: ["predict_brdf", "predict_relighting"]
   predict_mesh:
     dataset_name: mesh_export
     predict_step_fn_name: _predict_step_mesh
-    gt_mesh_fpath: ${conf.dataset.data_dir}/mesh_Gt.ply
-    bbox_res: 512  # in voxel
+    gt_mesh_fpath: ${conf.dataset.data_dir}/gt_mesh.ply
+    bbox_res: 1024
     chunk_size: 2097152
-    export_brdf_latent: false  # whether to export BRDF latent features as RGB colors
-    view_light_index_fname: view_20_light_1  # for visualizing the mesh. Only unique views will be used.
-    view_light_index_file: ./configs/view_light_indices/${conf.dataset.val.view_light_index_fname}.txt
-    img_downscale: 1 # for mesh rendering
-
+    export_brdf_latent: false
+    view_light_index_fname: suzanne_fib50_point_val
+    view_light_index_file: ${conf.dataset.data_dir}/view_light_idx_val.txt
+    img_downscale: 4
   predict_brdf:
     dataset_name: brdf_render
     predict_step_fn_name: _predict_step_brdf
-    img_downscale: 1 # for brdf map rendering
-    brdf_sphere_res: 64 # in pixel
-    view_light_index: "V00L00" # the view for brdf map rendering. Align with the　image name.
-    light_direction: [0, 0, -1]  # ensure negative z component. Will be normalized in the code.
-
-  predict_relighting: # for novel-view relighting rendering
+    img_downscale: 4
+    brdf_sphere_res: 64
+    view_light_index: "V00L00"
+    light_direction: [0, 0, -1]
+  predict_relighting:
     dataset_name: relighting
     predict_step_fn_name: _predict_step_relighting
-    img_width: 512 # in pixel
-    img_height: 512 # in pixel
-    camera_focal_length_to_img_width_ratio: 5.0 # focal length = camera_focal_length_to_img_width * img_width
+    img_width: 512
+    img_height: 512
+    camera_focal_length_to_img_width_ratio: 5.0
     light_frames: 20
-    light_elevation: 60 # in degree
+    light_elevation: 60
     camera_frames: 60
-    camera_elevation: 10 # in degree
-    camera_distance: 8 # distance from the object center, in object space (i.e., the object is in a unit sphere)
-    camera_lookat: [0, 0, 0] # in object space
+    camera_elevation: 10
+    camera_distance: 8
+    camera_lookat: [0, 0, 0]
     view_light_idx_sample: "V00L00"
 
 model:
   name: mvscps
   radius: 1.0
   num_samples_per_ray: 1024
-  num_lights: ${conf.dataset.train_num_lights}
   train_num_rays: 512
   max_train_num_rays: 4096
   grid_prune: true
@@ -135,17 +125,19 @@ model:
   ray_chunk: 4096
   cos_anneal_end: 5000
   save_mesh_interval: ${conf.trainer.max_steps}
+  use_shadow: true
   light:
-    light_type: directional          # 'directional' or 'point'
+    light_type: point
+    per_image_light: false
     init_light_dir: [0, 0, -1.]
-    init_light_pos: [0, 0, -1.0]     # Initial position in normalized scene coordinates (only for point)
+    init_light_pos: [0, 0, 0.5]
     init_intensity: 1.0
     use_gt_light: false
     freeze_light: false
-    light_dir_file: ${conf.dataset.data_dir}/light_directions.txt
+    light_dir_file: "None"
     light_int_file: ${conf.dataset.data_dir}/light_intensities.txt
-    light_pos_file: "None"           # Path to normalized light positions (only for point)
-    attenuation_eps: 1.e-4           # Epsilon for 1/(d²+ε) stability
+    light_pos_file: ${conf.dataset.data_dir}/light_positions_cam_scaled.npz
+    attenuation_eps: 1.e-4
     view_light_index_fname_train: ${conf.dataset.train.view_light_index_file}
   variance:
     init_val: 0.3
@@ -157,7 +149,7 @@ model:
     grad_type: analytic
     isosurface:
       method: mc
-      resolution: 512
+      resolution: 1024
       chunk: 2097152
       threshold: 0.
     xyz_encoding_config:
@@ -193,7 +185,7 @@ model:
       n_hidden_layers: 2
   shadow:
     name: shadow-mapping
-    input_feature_dim: ${add:${conf.model.geometry.feature_dim}, -1} # surface normal as additional input
+    input_feature_dim: ${add:${conf.model.geometry.feature_dim}, -1}
     dir_encoding_config:
       otype: SphericalHarmonics
       degree: 3
@@ -230,7 +222,6 @@ system:
         lr: 0.001
       shadow_mapping:
         lr: 0.001
-
   scheduler:
     name: SequentialLR
     constant_steps: 5000
@@ -246,10 +237,6 @@ system:
         args:
           gamma: ${calc_exp_lr_decay_rate:0.1,${sub:${conf.trainer.max_steps},${conf.system.scheduler.constant_steps}}}
 
-
-
 export:
   chunk_size: 2097152
   export_spatial_latent: false
-
-

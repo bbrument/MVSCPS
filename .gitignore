@@ -145,6 +145,7 @@ cython_debug/
 
 .DS_Store
 .vscode/
+exp
 exp/
 runs/
 data/
@@ -153,3 +154,22 @@ data/
 extern/
 .idea/
 outputs/
+
+# Symlinks to external data/results
+eval
+eval_pipeline
+
+# Environment
+venv*/
+.claude/
+
+# Claude Code plugins
+docs/superpowers/
+
+# SLURM logs
+slurm/logs/
+
+# Temporary outputs
+verify_output/
+*.pdf
+*.png

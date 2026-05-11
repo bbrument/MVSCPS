@@ -21,7 +21,16 @@ class NeuSModel(nn.Module):
         self.rank = get_rank()
         self.setup()
         if self.config.get('weights', None):
-            self.load_state_dict(torch.load(self.config.weights))
+            state_dict = torch.load(self.config.weights)
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            if missing or unexpected:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Checkpoint key mismatch (possibly due to light_type change):\n"
+                    f"  Missing keys: {missing}\n"
+                    f"  Unexpected keys: {unexpected}"
+                )
 
     def setup(self):
         self.geometry = REG.build('model', self.config.geometry)
@@ -108,12 +117,24 @@ class NeuSModel(nn.Module):
         return alpha
 
     def shadow_render_volume_render(self, surface_points, surface_point_to_light_dir, n_samples=128, lnear=1e-2, lfar=0.5):
-        # ic(surface_points.shape, surface_point_to_light_dir.shape)
-        # sample points uniformly
-        t = torch.linspace(lnear, lfar, n_samples, device=surface_points.device, dtype=surface_points.dtype)
+        n_rays = surface_points.shape[0]
+        device = surface_points.device
+        dtype = surface_points.dtype
 
-        # sample points from surface points towards the point light
-        sample_points = surface_points[:, None, :] + t[None, :, None] * surface_point_to_light_dir[:, None, :]
+        if isinstance(lfar, (int, float)):
+            # DIRECTIONAL: scalar lfar, all rays sample the same range
+            t = torch.linspace(lnear, lfar, n_samples, device=device, dtype=dtype)
+            t_expanded = t[None, :, None]  # (1, n_samples, 1)
+            dists = torch.ones(n_samples, device=device, dtype=dtype) * (lfar - lnear) / n_samples
+        else:
+            # POINT LIGHT: per-ray lfar tensor of shape (N_rays, 1)
+            t_unit = torch.linspace(0, 1, n_samples, device=device, dtype=dtype)  # (n_samples,)
+            t = lnear + t_unit[None, :] * (lfar - lnear)  # (N_rays, n_samples)
+            t_expanded = t[:, :, None]  # (N_rays, n_samples, 1)
+            dists = (lfar - lnear) / n_samples  # (N_rays, 1) broadcast-compatible
+
+        # sample points from surface points towards the light
+        sample_points = surface_points[:, None, :] + t_expanded * surface_point_to_light_dir[:, None, :]
 
         # reverse the sample points along the second axis
         sample_points = sample_points.flip(1)
@@ -122,14 +143,11 @@ class NeuSModel(nn.Module):
         shadow_ray_sdf, shadow_ray_sdf_grad, _ = self.geometry(sample_points, with_grad=True, with_feature=True)
         shadow_ray_normal_world_space = Fn.normalize(shadow_ray_sdf_grad, p=2, dim=-1)
 
-        dists = torch.ones_like(t) * (lfar - lnear) / n_samples
-
         # Both camera space or world space are fine, since only their inner product is used
-        shadow_ray_alpha = self.get_shadow_ray_alpha(shadow_ray_sdf, shadow_ray_normal_world_space, surface_point_to_light_dir[:, None, :],dists)[..., None]
-        shadow_ray_alpha = shadow_ray_alpha.squeeze()
-        n_rays = shadow_ray_alpha.shape[0]
+        shadow_ray_alpha = self.get_shadow_ray_alpha(shadow_ray_sdf, shadow_ray_normal_world_space, surface_point_to_light_dir[:, None, :], dists)
+        shadow_ray_alpha = shadow_ray_alpha.squeeze(-1)  # (N_rays, n_samples)
         shadow_ray_weights = shadow_ray_alpha * torch.cumprod(
-            torch.cat([torch.ones([n_rays, 1], device=shadow_ray_alpha.device), 1. - shadow_ray_alpha + 1e-7], -1), -1)[:, :-1]
+            torch.cat([torch.ones([n_rays, 1], device=device), 1. - shadow_ray_alpha + 1e-7], -1), -1)[:, :-1]
         shadow_map = 1 - shadow_ray_weights.sum(dim=-1, keepdim=True)
         return shadow_map
 
@@ -197,25 +215,43 @@ class NeuSModel(nn.Module):
         return geometry_out
 
 
-    def render_shading(self, geometry_out, rays_light_dir_world_space):
-        n_rays = rays_light_dir_world_space.shape[0]
-
+    def render_shading(self, geometry_out, rays_light_dir_world_space=None, rays_light_pos_world_space=None):
         samples_weights = geometry_out["samples_weights"]
         samples_normal_dir_world_space = geometry_out["samples_normal_dir_world_space"]
         rays_to_samples_indices = geometry_out["rays_to_samples_indices"]
         samples_brdf_latent = geometry_out["samples_brdf_latent"]
+        samples_positions = geometry_out["samples_positions"]
 
         # reverse the view direction to point towards the camera
         samples_view_dir_world_space = -geometry_out["samples_view_dir_world_space"]
 
-        samples_light_dir_world_space = rays_light_dir_world_space[rays_to_samples_indices]
+        if rays_light_pos_world_space is not None:
+            # POINT LIGHT: per-sample direction and attenuation
+            n_rays = rays_light_pos_world_space.shape[0]
+            samples_light_pos = rays_light_pos_world_space[rays_to_samples_indices]  # (N_samples, 3)
+            samples_to_light = samples_light_pos - samples_positions                 # (N_samples, 3)
+            samples_dist_sq = torch.sum(samples_to_light ** 2, dim=-1, keepdim=True) # (N_samples, 1)
+            samples_light_dir_world_space = Fn.normalize(samples_to_light, p=2, dim=-1)
+            samples_attenuation = 1.0 / (samples_dist_sq + self.config.light.get('attenuation_eps', 1e-4))
+        else:
+            # DIRECTIONAL: existing broadcast per-ray → per-sample
+            n_rays = rays_light_dir_world_space.shape[0]
+            samples_light_dir_world_space = rays_light_dir_world_space[rays_to_samples_indices]
+            samples_attenuation = 1.0  # no distance falloff
+
+        # BRDF call (UNCHANGED — always receives unit direction L)
         samples_brdf_values = self.brdf(samples_brdf_latent,
                                         samples_normal_dir_world_space,
                                         samples_view_dir_world_space,
                                         samples_light_dir_world_space)  # (N_samples, 3)
 
-        samples_NoL = torch.sum(samples_normal_dir_world_space * samples_light_dir_world_space, dim=-1,keepdim=True)
-        samples_shading_values = samples_brdf_values * Fn.softplus(samples_NoL)  # (N_samples, 3)
+        samples_NoL = torch.sum(samples_normal_dir_world_space * samples_light_dir_world_space, dim=-1, keepdim=True)
+        cosine_fn = self.config.get('cosine_function', 'softplus')
+        if cosine_fn == 'max':
+            samples_cosine = torch.clamp(samples_NoL, min=0.0)
+        else:
+            samples_cosine = Fn.softplus(samples_NoL)
+        samples_shading_values = samples_brdf_values * samples_cosine * samples_attenuation  # (N_samples, 3)
         samples_cosine_term = torch.max(samples_NoL, torch.zeros_like(samples_NoL) + 1e-7)  # Only for visualization.
 
         rays_shading = accumulate_along_rays(samples_weights,
@@ -232,13 +268,24 @@ class NeuSModel(nn.Module):
         return shading_out
 
 
-    def render_shadow(self, geometry_out, rays_light_dir_world_space, rays_view_dir_world_space):
+    def render_shadow(self, geometry_out, rays_light_dir_world_space=None,
+                      rays_view_dir_world_space=None, rays_light_pos_world_space=None):
         rays_surface_points = geometry_out["rays_surface_points"]
+
+        if rays_light_pos_world_space is not None:
+            # POINT LIGHT: direction and distance from surface to light
+            to_light = rays_light_pos_world_space - rays_surface_points
+            shadow_dir = Fn.normalize(to_light, p=2, dim=-1)
+            shadow_lfar = torch.norm(to_light, dim=-1, keepdim=True).clamp(min=0.01)  # (N_rays, 1)
+        else:
+            shadow_dir = rays_light_dir_world_space
+            shadow_lfar = 0.5  # fixed for directional
+
         rays_shadow_rendered = self.shadow_render_volume_render(rays_surface_points,
-                                                                rays_light_dir_world_space,
+                                                                shadow_dir,
                                                                 n_samples=64,
                                                                 lnear=0.01,
-                                                                lfar=0.5)
+                                                                lfar=shadow_lfar)
 
         shadow_out = {
             "rays_shadow_rendered": rays_shadow_rendered
@@ -257,28 +304,54 @@ class NeuSModel(nn.Module):
         # render geometry-related information
         geometry_out = self.forward_geometry(rays_origin, rays_dir_world_space)
 
-        # get lighting.py information, both in shape (N_rays, 3)
+        # get lighting information, both in shape (N_rays, 3)
+        rays_light_dir_world_space = None
+        rays_light_pos_world_space = None
         if single_light_dir_world_space is None:
             # for train/validation, rays_light_index is provided
             # light directions and intensities are indexed from LightingParameters
             rays_light_index = rays[:, 6].long()
             rays_R_c2w = rays[:, 7:16].reshape(-1, 3, 3)
-            rays_light_intensity, rays_light_dir_camera_space = self.lighting(rays_light_index)
-            rays_light_dir_world_space = (rays_R_c2w @ rays_light_dir_camera_space[..., None])[..., 0]  # (n_rays, 3)
+            lighting_out = self.lighting(rays_light_index)
+            rays_light_intensity = lighting_out.intensity
+
+            if lighting_out.light_type == 'directional':
+                # direction in camera space → world space
+                rays_light_dir_world_space = (rays_R_c2w @ lighting_out.direction[..., None])[..., 0]
+            else:
+                if self.config.light.get('light_space', 'camera') == 'world':
+                    # positions already in obj-space (fixed world lights)
+                    rays_light_pos_world_space = lighting_out.position
+                else:
+                    # position in camera space → world space
+                    # S_world = R_c2w @ S_cam + t_c2w (where t_c2w = camera center = rays_origin)
+                    rays_light_pos_world_space = (rays_R_c2w @ lighting_out.position[..., None])[..., 0] + rays_origin
         else:
             # for relighting, rays_light_dir_world_space is provided
             rays_light_intensity = torch.ones((n_rays, 3), device=rays.device)
             rays_light_dir_world_space = single_light_dir_world_space.expand(n_rays, 3)
 
         # render shading
-        shading_out = self.render_shading(geometry_out, rays_light_dir_world_space)
+        shading_out = self.render_shading(geometry_out,
+                                          rays_light_dir_world_space=rays_light_dir_world_space,
+                                          rays_light_pos_world_space=rays_light_pos_world_space)
 
-        # render shadow
-        shadow_out = self.render_shadow(geometry_out, rays_light_dir_world_space, rays_dir_world_space)
+        # render shadow (skip entirely when use_shadow is disabled)
+        rays_rgb_wo_shadow = shading_out['rays_shading'] * rays_light_intensity
+        if self.config.get('use_shadow', True):
+            shadow_out = self.render_shadow(geometry_out,
+                                            rays_light_dir_world_space=rays_light_dir_world_space,
+                                            rays_view_dir_world_space=rays_dir_world_space,
+                                            rays_light_pos_world_space=rays_light_pos_world_space)
+            rays_rgb_w_shadow = rays_rgb_wo_shadow * shadow_out["rays_shadow_refined"]
+        else:
+            shadow_out = {
+                "rays_shadow_rendered": torch.ones((n_rays, 1), device=rays_rgb_wo_shadow.device),
+                "rays_shadow_refined": torch.ones((n_rays, 1), device=rays_rgb_wo_shadow.device),
+            }
+            rays_rgb_w_shadow = rays_rgb_wo_shadow
 
         # combine shading and shadow
-        rays_rgb_wo_shadow = shading_out['rays_shading'] * rays_light_intensity
-        rays_rgb_w_shadow = rays_rgb_wo_shadow * shadow_out["rays_shadow_refined"]
         rays_rgb_final = rays_rgb_w_shadow + (1.0 - geometry_out['rays_opacity'])
 
         if single_light_dir_world_space is None:

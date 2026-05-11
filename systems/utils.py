@@ -388,11 +388,19 @@ def parse_optimizer(config, model):
             param = get_parameters(model, name)
             if isinstance(param, (list, tuple)):
                 for idx, m in enumerate(param):
-                    # ic(m.device)
-                    params.append({'params': m, "name": f"{name}_{idx}", **args})
+                    param_list = list(m) if not isinstance(m, list) else m
+                    trainable = [p for p in param_list if p.requires_grad]
+                    if not trainable:
+                        rank_zero_debug(f"Skipping param group '{name}_{idx}': all parameters frozen")
+                        continue
+                    params.append({'params': trainable, "name": f"{name}_{idx}", **args})
             else:
-                params.append({'params': param, "name": name, **args})
-        # params = [{'params': get_parameters(model, name), 'name': name, **args} for name, args in configs.params.items()]
+                param_list = list(param) if hasattr(param, '__iter__') and not isinstance(param, nn.Parameter) else [param]
+                trainable = [p for p in param_list if p.requires_grad]
+                if not trainable:
+                    rank_zero_debug(f"Skipping param group '{name}': all parameters frozen")
+                    continue
+                params.append({'params': trainable, "name": name, **args})
         rank_zero_debug('Specify optimizer params:', config.params)
     else:
         params = model.parameters()

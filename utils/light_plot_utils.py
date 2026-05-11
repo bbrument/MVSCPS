@@ -57,6 +57,28 @@ def plot_lighting_gt(dirs, ints, save_dir):
     ints = ints / ints.max()
     plot_light(dirs[:,0], dirs[:, 1], save_name, ints)
 
+def plot_light_pos_3d(positions, save_name, c=None, gt_positions=None):
+    """3D scatter of point light positions in camera space."""
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter([0], [0], [0], c='black', s=100, marker='s', label='Camera')
+    sc = ax.scatter(positions[:, 0], positions[:, 1], positions[:, 2],
+                    c=c if c is not None else 'orange', cmap='jet',
+                    s=60, edgecolors='k', linewidth=0.5, label='Estimated')
+    for i, p in enumerate(positions):
+        ax.text(p[0], p[1], p[2], str(i), fontsize=6)
+    if gt_positions is not None:
+        ax.scatter(gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2],
+                   c='green', s=40, marker='^', alpha=0.5, label='GT')
+    r = max(np.abs(positions).max(), 0.5) * 1.3
+    ax.set_xlim(-r, r); ax.set_ylim(-r, r); ax.set_zlim(-0.1, r)
+    ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z (forward)')
+    ax.set_title(f'Point lights ({len(positions)})')
+    ax.legend(fontsize=8)
+    plt.savefig(save_name, dpi=100, bbox_inches='tight')
+    plt.close()
+
+
 def plot_dir_error(light, error, save_dir):
     # plot light direction estimation error
     save_name = os.path.join(save_dir, 'est_light_error_dir.png')

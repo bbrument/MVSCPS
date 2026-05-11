@@ -62,6 +62,36 @@ class VolumeRadianceNear(nn.Module):
     def regularizations(self, out):
         return {}
 
+@REG.register('model', name='lambertian_brdf')
+class LambertianBRDF(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.albedo_mode = config.get('albedo_mode', 'fixed')
+        self.n_output_dims = 3
+
+        if self.albedo_mode == 'fixed':
+            albedo_value = config.get('albedo_value', [0.7, 0.7, 0.7])
+            self.register_buffer('albedo', torch.tensor(albedo_value, dtype=torch.float32))
+        else:
+            n_input = int(config.input_feature_dim)
+            network = get_mlp(n_input, self.n_output_dims, config.mlp_network_config)
+            self.network = network
+
+    def forward(self, spatial_features, N, V, L):
+        if self.albedo_mode == 'fixed':
+            return self.albedo.expand(spatial_features.shape[0], 3)
+        albedo = self.network(spatial_features.view(-1, spatial_features.shape[-1]).float())
+        albedo = torch.sigmoid(albedo)
+        return albedo.view(*spatial_features.shape[:-1], self.n_output_dims)
+
+    def update_step(self, epoch, global_step):
+        pass
+
+    def regularizations(self, out):
+        return {}
+
+
 @REG.register('model', name='shadow-mapping')
 class ShadowNet(nn.Module):
     def __init__(self, config):

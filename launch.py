@@ -59,8 +59,8 @@ def _resolve_resume_ckpt(exp_conf):
 @hydra.main(version_base=None, config_path="configs")
 def main(config : DictConfig) -> None:
     # set CUDA_VISIBLE_DEVICES then import pytorch-lightning
-    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+    os.environ.setdefault('CUDA_DEVICE_ORDER', 'PCI_BUS_ID')
+    os.environ.setdefault('CUDA_VISIBLE_DEVICES', '0')
 
     cfg = config.conf
 

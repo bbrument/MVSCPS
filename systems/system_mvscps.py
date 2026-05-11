@@ -7,7 +7,10 @@ import torch
 import torch.nn.functional as F
 
 pv.set_plot_theme('document')
-pv.start_xvfb()
+try:
+    pv.start_xvfb()
+except OSError:
+    pass
 import igl
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
@@ -26,7 +29,7 @@ from systems.criterions import (MAE, binary_cross_entropy,
                                 chamfer_distance_and_f1_score,
                                 scale_invariant_mse)
 from systems.utils import parse_optimizer, parse_scheduler, update_module_step
-from utils.light_plot_utils import plot_light
+from utils.light_plot_utils import plot_light, plot_light_pos_3d
 from utils.misc import config_to_primitive, get_rank
 from utils.mixins import SaverMixin
 
@@ -184,7 +187,7 @@ class MvscpsSystem(pl.LightningModule, SaverMixin):
             self.log('test/mae_normal', round(normal_angular_err.item(), 2), prog_bar=True)
 
         # if dataset has gt light directions, evaluate the light directions
-        if self.dataset.light_dirs_GT is not None:
+        if self.model.lighting.light_type == 'directional' and self.dataset.light_dirs_GT is not None:
             light_est = F.normalize(self.model.lighting.light_dir[self.model.lighting.train_light_indices], p=2, dim=-1).detach().cpu().numpy()
             light_est[..., [1,2]] = -light_est[..., [1,2]]
             light_gt = self.dataset.light_dirs_GT[self.model.lighting.train_light_indices]
@@ -194,6 +197,9 @@ class MvscpsSystem(pl.LightningModule, SaverMixin):
             light_gt = light_gt.reshape(-1, 3)
             light_angular_err = np.mean(np.arccos(np.clip(np.sum(light_est * light_gt, axis=-1), -1, 1)) * 180 / np.pi)
             self.log('test/mae_light', round(light_angular_err.item(), 2), prog_bar=True)
+        elif self.model.lighting.light_type == 'point':
+            estimated_pos = self.model.lighting.light_pos.detach().cpu().numpy()
+            self.log('test/light_pos_mean_norm', float(np.mean(np.linalg.norm(estimated_pos, axis=-1))), prog_bar=True)
 
         return {
             'loss': loss
@@ -258,19 +264,27 @@ class MvscpsSystem(pl.LightningModule, SaverMixin):
         plt.savefig(self.get_save_path(f"validation_results/sdf_slice/it{self.global_step}.png"), transparent=True)
         plt.close()
 
-        # save the light directions and intensity
-        light_dir_est = self.model.lighting.light_dir[self.model.lighting.train_light_indices].detach().cpu().numpy()
-        light_dir_est[..., [1, 2]] = -light_dir_est[..., [1, 2]]
-        light_dir_est = light_dir_est / np.linalg.norm(light_dir_est, axis=-1, keepdims=True)
+        # save the light parameters and intensity
         light_intensity = self.model.lighting.intensity[self.model.lighting.train_light_indices].detach().cpu().numpy()
-        light_intensity_normalized = light_intensity / light_intensity.max()
+        light_intensity_normalized = light_intensity / (light_intensity.max() + 1e-8)
 
-        fname_plot = self.get_save_path(f"validation_results/light/it{self.global_step}_light_dir.png")
-        plot_light(light_dir_est[:, 0], light_dir_est[:, 1], fname_plot, c=light_intensity_normalized.mean(axis=-1))
+        if self.model.lighting.light_type == 'directional':
+            light_dir_est = self.model.lighting.light_dir[self.model.lighting.train_light_indices].detach().cpu().numpy()
+            light_dir_est[..., [1, 2]] = -light_dir_est[..., [1, 2]]
+            light_dir_est = light_dir_est / (np.linalg.norm(light_dir_est, axis=-1, keepdims=True) + 1e-8)
 
-        # save light intensity and directions as txt file
-        np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_intensity.txt"), light_intensity)
-        np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_dir.txt"), light_dir_est)
+            fname_plot = self.get_save_path(f"validation_results/light/it{self.global_step}_light_dir.png")
+            plot_light(light_dir_est[:, 0], light_dir_est[:, 1], fname_plot, c=light_intensity_normalized.mean(axis=-1))
+
+            np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_intensity.txt"), light_intensity)
+            np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_dir.txt"), light_dir_est)
+        else:
+            light_pos_est = self.model.lighting.light_pos[self.model.lighting.train_light_indices].detach().cpu().numpy()
+            np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_intensity.txt"), light_intensity)
+            np.savetxt(self.get_save_path(f"validation_results/light/it{self.global_step}_light_pos.txt"), light_pos_est)
+
+            fname_plot = self.get_save_path(f"validation_results/light/it{self.global_step}_light_pos.png")
+            plot_light_pos_3d(light_pos_est, fname_plot, c=light_intensity_normalized.mean(axis=-1))
 
     def validation_epoch_end(self, outputs):
         pass
@@ -428,32 +442,39 @@ class MvscpsSystem(pl.LightningModule, SaverMixin):
                 self.dataset.light_intensity_GT[self.model.lighting.train_light_indices])
             self.log('test/simse_light', simse, prog_bar=True)
 
-        # evaluate light direction
-        light_dir_est = F.normalize(self.model.lighting.light_dir[self.model.lighting.train_light_indices], p=2,
-                                dim=-1).detach().cpu().numpy()
-        light_dir_est[..., [1, 2]] = -light_dir_est[..., [1, 2]]  # opencv to opengl convert
-        if self.dataset.light_dirs_GT is not None:
-            light_dir_gt = self.dataset.light_dirs_GT[self.model.lighting.train_light_indices]
-            light_mae = self.criterions['mae'](light_dir_est.reshape(-1, 3), light_dir_gt.reshape(-1, 3))[0]
-            self.log('test/mae_light', light_mae, prog_bar=True)
-
-        # save images of light directions and intensity
+        # evaluate and save light parameters
         fname_light_int = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_intensity.txt")
         if not os.path.exists(fname_light_int):
             np.savetxt(fname_light_int, light_intensity)
-        fname_light_dir = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_dir.txt")
-        if not os.path.exists(fname_light_dir):
-            np.savetxt(fname_light_dir, light_dir_est)
 
-        fname_png = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_dir_est.png")
-        light_intensity = light_intensity / light_intensity.max()
-        plot_light(light_dir_est[:, 0], light_dir_est[:, 1], fname_png, c=light_intensity.mean(axis=-1))
+        if self.model.lighting.light_type == 'directional':
+            light_dir_est = F.normalize(self.model.lighting.light_dir[self.model.lighting.train_light_indices], p=2,
+                                    dim=-1).detach().cpu().numpy()
+            light_dir_est[..., [1, 2]] = -light_dir_est[..., [1, 2]]  # opencv to opengl convert
+            if self.dataset.light_dirs_GT is not None:
+                light_dir_gt = self.dataset.light_dirs_GT[self.model.lighting.train_light_indices]
+                light_mae = self.criterions['mae'](light_dir_est.reshape(-1, 3), light_dir_gt.reshape(-1, 3))[0]
+                self.log('test/mae_light', light_mae, prog_bar=True)
 
-        if self.dataset.light_dirs_GT is not None:
-            fname_plot_gt = self.get_save_path(f"test_results/it{self.trained_global_step}/light/light_dir_GT.png")
-            if self.dataset.light_intensity_GT is not None:
-                light_intensity_gt = light_intensity_gt / light_intensity_gt.max()
-                plot_light(light_dir_gt[:, 0], light_dir_gt[:, 1], fname_plot_gt, c=light_intensity_gt.mean(axis=-1))
+            fname_light_dir = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_dir.txt")
+            if not os.path.exists(fname_light_dir):
+                np.savetxt(fname_light_dir, light_dir_est)
+
+            fname_png = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_dir_est.png")
+            light_intensity_plot = light_intensity / (light_intensity.max() + 1e-8)
+            plot_light(light_dir_est[:, 0], light_dir_est[:, 1], fname_png, c=light_intensity_plot.mean(axis=-1))
+
+            if self.dataset.light_dirs_GT is not None:
+                fname_plot_gt = self.get_save_path(f"test_results/it{self.trained_global_step}/light/light_dir_GT.png")
+                if self.dataset.light_intensity_GT is not None:
+                    light_intensity_gt = light_intensity_gt / (light_intensity_gt.max() + 1e-8)
+                    plot_light(light_dir_gt[:, 0], light_dir_gt[:, 1], fname_plot_gt, c=light_intensity_gt.mean(axis=-1))
+        else:
+            # Point light: save positions
+            light_pos_est = self.model.lighting.light_pos[self.model.lighting.train_light_indices].detach().cpu().numpy()
+            fname_light_pos = self.get_save_path(f"test_results/it{self.trained_global_step}/light/it{self.trained_global_step}_light_pos.txt")
+            if not os.path.exists(fname_light_pos):
+                np.savetxt(fname_light_pos, light_pos_est)
 
         # evaluate mesh quality
         cd, fscore = self.export()

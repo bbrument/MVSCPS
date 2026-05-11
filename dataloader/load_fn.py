@@ -74,3 +74,8 @@ def select_camera(view_light_index, cams, img_downscale=1):
 @REG.register("fn", name="diligentmv_light")
 def load_lights(lights_fpath):
     return np.loadtxt(lights_fpath)
+
+
+# Register load functions from other dataset modules
+import dataloader.load_fn_lucesmv  # registers lucesmv_* load functions
+import dataloader.load_fn_idr      # registers idr_* load functions

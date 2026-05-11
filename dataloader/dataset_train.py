@@ -17,8 +17,8 @@ class DiligentTrainDataset(IterableDataset):
 
         self.img_load_fn = REG.get("fn", cfg.img_load_fn)
         self.mask_load_fn = REG.get("fn", cfg.mask_load_fn)
-        self.camera_load_fn = REG.get("fn", "load_camera")
-        self.camera_select_fn = REG.get("fn", "select_camera")
+        self.camera_load_fn = REG.get("fn", cfg.get('camera_load_fn', 'load_camera'))
+        self.camera_select_fn = REG.get("fn", cfg.get('camera_select_fn', 'select_camera'))
 
         self.cams = self.camera_load_fn(cfg.cameras_fpath)
 
@@ -34,7 +34,11 @@ class DiligentTrainDataset(IterableDataset):
         # load training image indices
         with open(cfg.train.view_light_index_file, 'r') as f:
             self.view_light_indices = f.read().splitlines()
-        self.light_idx = np.array([int(idx.split("L")[-1]) for idx in self.view_light_indices])
+        self.per_image_light = cfg.get('per_image_light', False)
+        if self.per_image_light:
+            self.light_idx = np.arange(len(self.view_light_indices))
+        else:
+            self.light_idx = np.array([int(idx.split("L")[-1]) for idx in self.view_light_indices])
 
         self.has_mask = True
 
@@ -71,7 +75,7 @@ class DiligentTrainDataset(IterableDataset):
         self.camera_centers_train_world_space = self.C2W_train[:, :3, 3]  # (N, 3)
 
         self.O2W_scale = self.cams["O2W_scale"]
-        self.O2W_translation = self.cams["O2W_translation"]
+        self.O2W_translation = np.array(self.cams["O2W_translation"])
         self.camera_centers_train_obj_space = (self.camera_centers_train_world_space - self.O2W_translation) / self.O2W_scale
 
         # load GT normal maps, evaluation purpose only
@@ -123,7 +127,7 @@ class DiligentTrainDataset(IterableDataset):
         # load GT light directions and intensities for evaluation.
         if self.config.light_dir_file != "None":
             self.has_gt_light = True
-            self.light_load_fn = REG.get("fn", "diligentmv_light")
+            self.light_load_fn = REG.get("fn", cfg.get('light_load_fn', 'diligentmv_light'))
             self.light_dirs_GT = self.light_load_fn(self.config.light_dir_file)  # (N_L, 3)
             self.light_intensity_GT = self.light_load_fn(self.config.light_int_file)  # (N_L, 3)
         else:
